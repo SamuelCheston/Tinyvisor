@@ -859,7 +859,7 @@ function App() {
         <DialogTitle>设备配对</DialogTitle>
         <DialogContent>
           <DialogContentText sx={{ mb: 2 }}>
-            首次使用或密钥失效，请输入后端显示的 4 位 PIN 码进行配对。
+            首次使用或密钥失效，请在服务器本地生成配对码后输入。终端界面按 G 可生成新配对码（10分钟有效）。
           </DialogContentText>
           {pairingError && (
             <Alert severity="error" sx={{ mb: 2 }}>

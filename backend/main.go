@@ -45,10 +45,12 @@ const (
 )
 
 type Config struct {
-	Port       int    `json:"port"`
-	Name       string `json:"name"`
-	APIKey     string `json:"apiKey"`
-	PairingPIN string `json:"pairingPIN"`
+	Port         int    `json:"port"`
+	Name         string `json:"name"`
+	APIKey       string `json:"apiKey"`
+	PairingPIN   string `json:"pairingPIN"`
+	PinCreatedAt string `json:"pinCreatedAt"`
+	PinExpiresAt string `json:"pinExpiresAt"`
 }
 
 type Script struct {
@@ -116,6 +118,8 @@ type App struct {
 	mu       sync.RWMutex
 	scripts  map[string]*ManagedScript
 	upgrader websocket.Upgrader
+
+	configMu sync.Mutex
 }
 
 func generateRandomString(length int) string {
@@ -136,10 +140,10 @@ func generateRandomPIN(length int) string {
 	return string(result)
 }
 
-func setupEnvironment() (Config, string, string, error) {
+func setupEnvironment() (Config, string, string, bool, error) {
 	wd, err := os.Getwd()
 	if err != nil {
-		return Config{}, "", "", err
+		return Config{}, "", "", false, err
 	}
 
 	// 查找配置文件，先在当前目录找，找不到去上级目录找
@@ -157,9 +161,10 @@ func setupEnvironment() (Config, string, string, error) {
 	scriptFiles := filepath.Join(daemonRoot, scriptFilesDirName)
 
 	if mkdirErr := os.MkdirAll(scriptFiles, 0755); mkdirErr != nil {
-		return Config{}, "", "", mkdirErr
+		return Config{}, "", "", false, mkdirErr
 	}
 
+	createdConfig := false
 	if _, statErr := os.Stat(configPath); os.IsNotExist(statErr) {
 		defaultConfig := Config{
 			Port:       7891,
@@ -169,41 +174,38 @@ func setupEnvironment() (Config, string, string, error) {
 		}
 		data, marshalErr := json.MarshalIndent(defaultConfig, "", "  ")
 		if marshalErr != nil {
-			return Config{}, "", "", marshalErr
+			return Config{}, "", "", false, marshalErr
 		}
 		if writeErr := os.WriteFile(configPath, data, 0644); writeErr != nil {
-			return Config{}, "", "", writeErr
+			return Config{}, "", "", false, writeErr
 		}
+		createdConfig = true
 	}
 
 	if _, statErr := os.Stat(storePath); os.IsNotExist(statErr) {
 		emptyStore := scriptStore{Scripts: []Script{}}
 		data, marshalErr := json.MarshalIndent(emptyStore, "", "  ")
 		if marshalErr != nil {
-			return Config{}, "", "", marshalErr
+			return Config{}, "", "", false, marshalErr
 		}
 		if writeErr := os.WriteFile(storePath, data, 0644); writeErr != nil {
-			return Config{}, "", "", writeErr
+			return Config{}, "", "", false, writeErr
 		}
 	}
 
 	var config Config
 	configBytes, err := os.ReadFile(configPath)
 	if err != nil {
-		return Config{}, "", "", err
+		return Config{}, "", "", false, err
 	}
 	if err := json.Unmarshal(configBytes, &config); err != nil {
-		return Config{}, "", "", err
+		return Config{}, "", "", false, err
 	}
 
-	// 确保配置中有 APIKey 和 PairingPIN
+	// 确保配置中有 APIKey
 	updated := false
 	if config.APIKey == "" {
 		config.APIKey = generateRandomString(32)
-		updated = true
-	}
-	if config.PairingPIN == "" {
-		config.PairingPIN = generateRandomPIN(4)
 		updated = true
 	}
 
@@ -219,7 +221,7 @@ func setupEnvironment() (Config, string, string, error) {
 		config.Name = "Tinyvisor Service"
 	}
 
-	return config, storePath, scriptFiles, nil
+	return config, storePath, scriptFiles, createdConfig, nil
 }
 
 func newApp(config Config, storePath, scriptFiles string) (*App, error) {
@@ -803,6 +805,70 @@ func (a *App) startAutoScripts() {
 	}
 }
 
+func (a *App) saveCurrentConfig() error {
+	a.configMu.Lock()
+	cfg := a.config
+	a.configMu.Unlock()
+
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(a.configPath, data, 0644)
+}
+
+func (a *App) GeneratePairingPIN(initial bool) error {
+	pin := generateRandomPIN(4)
+	now := time.Now()
+
+	a.configMu.Lock()
+	a.config.PairingPIN = pin
+	a.config.PinCreatedAt = now.Format(time.RFC3339)
+	if initial {
+		a.config.PinExpiresAt = ""
+	} else {
+		a.config.PinExpiresAt = now.Add(10 * time.Minute).Format(time.RFC3339)
+	}
+	a.configMu.Unlock()
+
+	return a.saveCurrentConfig()
+}
+
+func (a *App) PairingStatus() (bool, string) {
+	a.configMu.Lock()
+	cfg := a.config
+	a.configMu.Unlock()
+
+	if strings.TrimSpace(cfg.PairingPIN) == "" {
+		return false, "未生成"
+	}
+
+	if cfg.PinExpiresAt != "" {
+		if t, err := time.Parse(time.RFC3339, cfg.PinExpiresAt); err == nil {
+			if time.Now().After(t) {
+				return false, "已过期"
+			}
+			remain := time.Until(t)
+			if remain < 0 {
+				remain = 0
+			}
+			return true, fmt.Sprintf("剩余 %s", remain.Truncate(time.Second))
+		}
+	}
+
+	return true, "无时限"
+}
+
+func (a *App) consumePairingPIN() error {
+	a.configMu.Lock()
+	a.config.PairingPIN = ""
+	a.config.PinCreatedAt = ""
+	a.config.PinExpiresAt = ""
+	a.configMu.Unlock()
+
+	return a.saveCurrentConfig()
+}
+
 func writeSSE(w io.Writer, entry LogEntry) error {
 	data, err := json.Marshal(entry)
 	if err != nil {
@@ -917,7 +983,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	config, storePath, scriptFiles, err := setupEnvironment()
+	config, storePath, scriptFiles, initialPinReady, err := setupEnvironment()
 	if err != nil {
 		panic(err)
 	}
@@ -925,6 +991,10 @@ func main() {
 	app, err := newApp(config, storePath, scriptFiles)
 	if err != nil {
 		panic(err)
+	}
+
+	if initialPinReady {
+		_ = app.GeneratePairingPIN(true)
 	}
 
 	var tui *TUI
@@ -978,9 +1048,12 @@ func main() {
 	api := r.Group("/api")
 	{
 		api.GET("/config", func(c *gin.Context) {
+			hasPin, pinStatus := app.PairingStatus()
 			c.JSON(http.StatusOK, gin.H{
-				"port": config.Port,
-				"name": config.Name,
+				"port":          app.config.Port,
+				"name":          app.config.Name,
+				"hasPairingPIN": hasPin,
+				"pinStatus":     pinStatus,
 			})
 		})
 
@@ -993,11 +1066,36 @@ func main() {
 				return
 			}
 
-			if payload.PIN == config.PairingPIN {
-				c.JSON(http.StatusOK, gin.H{"apiKey": config.APIKey})
-			} else {
-				c.JSON(http.StatusUnauthorized, gin.H{"error": "PIN 码不正确"})
+			payload.PIN = strings.TrimSpace(payload.PIN)
+			if payload.PIN == "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "PIN 不能为空"})
+				return
 			}
+
+			currentPIN := strings.TrimSpace(app.config.PairingPIN)
+			if currentPIN == "" {
+				c.JSON(http.StatusConflict, gin.H{"error": "当前无有效配对码，请在服务器本地生成新配对码"})
+				return
+			}
+
+			if app.config.PinExpiresAt != "" {
+				if t, err := time.Parse(time.RFC3339, app.config.PinExpiresAt); err == nil && time.Now().After(t) {
+					c.JSON(http.StatusConflict, gin.H{"error": "配对码已过期，请在服务器本地生成新配对码"})
+					return
+				}
+			}
+
+			if payload.PIN != currentPIN {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "PIN 码不正确"})
+				return
+			}
+
+			if err := app.consumePairingPIN(); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "清除配对码失败"})
+				return
+			}
+
+			c.JSON(http.StatusOK, gin.H{"apiKey": app.config.APIKey})
 		})
 
 		api.GET("/scripts", func(c *gin.Context) {
@@ -1209,7 +1307,14 @@ func main() {
 	address := fmt.Sprintf(":%d", config.Port)
 	if tui != nil {
 		tui.Log(fmt.Sprintf("%s listening on %s", config.Name, address))
-		tui.Log(fmt.Sprintf("Pairing PIN: %s", config.PairingPIN))
+
+		hasPin, pinStatus := app.PairingStatus()
+		if hasPin {
+			tui.Log(fmt.Sprintf("Pairing PIN: %s (%s)", app.config.PairingPIN, pinStatus))
+		} else {
+			tui.Log(fmt.Sprintf("Pairing PIN: %s", pinStatus))
+		}
+
 		go func() {
 			if err := r.Run(address); err != nil {
 				panic(err)
@@ -1220,7 +1325,14 @@ func main() {
 		}
 	} else {
 		fmt.Printf("%s listening on %s\n", config.Name, address)
-		fmt.Printf("Pairing PIN: %s\n", config.PairingPIN)
+
+		hasPin, pinStatus := app.PairingStatus()
+		if hasPin {
+			fmt.Printf("Pairing PIN: %s (%s)\n", app.config.PairingPIN, pinStatus)
+		} else {
+			fmt.Printf("Pairing PIN: %s\n", pinStatus)
+		}
+
 		if err := r.Run(address); err != nil {
 			panic(err)
 		}

@@ -2,5 +2,7 @@
   "port": 18083,
   "name": "Tinyvisor Single Binary",
   "apiKey": "7284ad2be28a9446fb6796b8508c1a4d",
-  "pairingPIN": "1844"
+  "pairingPIN": "",
+  "pinCreatedAt": "",
+  "pinExpiresAt": ""
 }

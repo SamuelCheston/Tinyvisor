@@ -40,7 +40,7 @@ func NewTUI(minivisor *App) *TUI {
 
 	t.status = tview.NewTextView().
 		SetTextAlign(tview.AlignCenter).
-		SetText("Minivisor Interactive Dashboard - Press Ctrl+C to exit")
+		SetText("Minivisor Interactive Dashboard - Press Ctrl+C to exit | Press G to generate pairing PIN")
 	t.status.SetBorder(true)
 
 	flex := tview.NewFlex().SetDirection(tview.FlexRow).
@@ -54,6 +54,16 @@ func NewTUI(minivisor *App) *TUI {
 			t.app.Stop()
 			return nil
 		}
+
+		if event.Rune() == 'G' || event.Rune() == 'g' {
+			if err := t.minivisor.GeneratePairingPIN(false); err != nil {
+				t.Log(fmt.Sprintf("生成配对码失败: %v", err))
+			} else {
+				t.Log("已生成新配对码（10分钟有效）")
+			}
+			return nil
+		}
+
 		return event
 	})
 
@@ -80,6 +90,9 @@ func (t *TUI) updateLoop() {
 				}
 				t.list.AddItem(s.Name, fmt.Sprintf("Status: %s%s[white] | PID: %d", statusColor, s.Status, s.PID), 0, nil)
 			}
+
+			_, pinStatus := t.minivisor.PairingStatus()
+			t.status.SetText(fmt.Sprintf("Minivisor Interactive Dashboard - Press Ctrl+C to exit | Pairing PIN: %s | Press G to generate pairing PIN", pinStatus))
 		})
 	}
 }
