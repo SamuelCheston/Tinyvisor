@@ -63,9 +63,12 @@ func installService(serviceType string) error {
 
 	workDir := filepath.Dir(execPath)
 
-	// Default to 'tinyvisor' user as requested by user decision
+	// Try to use a dedicated 'tinyvisor' user, fall back to root if creation fails
 	user := "tinyvisor"
-	checkAndCreateUser(user)
+	if !ensureUser(user) {
+		fmt.Printf("Falling back to root user.\n")
+		user = "root"
+	}
 
 	config := ServiceConfig{
 		User:     user,
@@ -153,43 +156,44 @@ func installOpenRC(config ServiceConfig) error {
 	return nil
 }
 
-func checkAndCreateUser(username string) {
+func ensureUser(username string) bool {
 	// Check if user exists
-	err := exec.Command("id", "-u", username).Run()
-	if err == nil {
-		fmt.Printf("User '%s' already exists.\n", username)
-		return
+	if userExists(username) {
+		return true
 	}
 
-	// Try to create user if running as root
-	if os.Geteuid() == 0 {
-		fmt.Printf("Creating user '%s'...\n", username)
-
-		var cmd *exec.Cmd
-		if _, err := exec.LookPath("adduser"); err == nil {
-			// Alpine/Busybox style adduser
-			cmd = exec.Command("adduser", "-D", "-H", "-s", "/bin/false", username)
-		} else if _, err := exec.LookPath("useradd"); err == nil {
-			// Standard shadow-utils useradd
-			cmd = exec.Command("useradd", "-r", "-s", "/bin/false", username)
-		}
-
-		if cmd != nil {
-			if err := cmd.Run(); err == nil {
-				fmt.Printf("User '%s' created successfully.\n", username)
-				return
-			} else {
-				fmt.Printf("Failed to create user '%s': %v\n", username, err)
-			}
-		}
+	if os.Geteuid() != 0 {
+		fmt.Printf("User '%s' does not exist and not running as root, cannot create.\n", username)
+		return false
 	}
 
-	fmt.Printf("User '%s' does not exist. You might need to create it manually:\n", username)
+	fmt.Printf("Creating user '%s'...\n", username)
+
+	// Try Alpine/Busybox style adduser first
 	if _, err := exec.LookPath("adduser"); err == nil {
-		fmt.Printf("  adduser -D -H -s /bin/false %s\n", username)
-	} else {
-		fmt.Printf("  sudo useradd -r -s /bin/false %s\n", username)
+		_ = exec.Command("adduser", "-D", "-H", "-s", "/bin/false", username).Run()
+		if userExists(username) {
+			fmt.Printf("User '%s' created successfully.\n", username)
+			return true
+		}
 	}
+
+	// Fallback to shadow-utils useradd (Debian/Ubuntu/etc.)
+	if _, err := exec.LookPath("useradd"); err == nil {
+		_ = exec.Command("groupadd", "-r", username).Run()
+		_ = exec.Command("useradd", "-r", "-g", username, "-s", "/bin/false", "-M", username).Run()
+		if userExists(username) {
+			fmt.Printf("User '%s' created successfully.\n", username)
+			return true
+		}
+	}
+
+	fmt.Printf("Failed to create user '%s'.\n", username)
+	return false
+}
+
+func userExists(username string) bool {
+	return exec.Command("id", "-u", username).Run() == nil
 }
 
 type ServiceStatus struct {
