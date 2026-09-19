@@ -62,6 +62,8 @@ func (sm *ScreenManager) Start(id, workDir, command string) error {
 
 	f, err := pty.Start(cmd)
 	if err != nil {
+		msg := fmt.Sprintf("\n[ERROR] Failed to start process: %v\n", err)
+		_, _ = logger.Write([]byte(msg))
 		logger.Close()
 		return err
 	}
@@ -112,7 +114,13 @@ func (sm *ScreenManager) consumeSession(id string, session *scriptSession) {
 	}
 
 	// 进程结束，清理
-	_ = session.cmd.Wait()
+	if waitErr := session.cmd.Wait(); waitErr != nil {
+		msg := fmt.Sprintf("\n[SYSTEM] Process exited with error: %v\n", waitErr)
+		_, _ = session.logger.Write([]byte(msg))
+	} else {
+		msg := "\n[SYSTEM] Process exited normally\n"
+		_, _ = session.logger.Write([]byte(msg))
+	}
 
 	sm.mu.Lock()
 	if sm.sessions[id] == session {

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"math/big"
 	"net/http"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/mattn/go-isatty"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 //go:embed dist/*
@@ -974,10 +976,40 @@ func (a *App) handleTerminalWS(c *gin.Context) {
 	}
 }
 
+func setupLogging(logsDir string) {
+	logFile := filepath.Join(logsDir, "tinyvisor.log")
+	logger := &lumberjack.Logger{
+		Filename:   logFile,
+		MaxSize:    10, // megabytes
+		MaxBackups: 3,
+		MaxAge:     28, // days
+		Compress:   true,
+	}
+
+	// 同时输出到文件和终端
+	multiWriter := io.MultiWriter(os.Stdout, logger)
+	log.SetOutput(multiWriter)
+	gin.DefaultWriter = multiWriter
+	gin.DefaultErrorWriter = multiWriter
+}
+
 func main() {
 	serviceInstall := flag.String("service-install", "", "Install as a system service (systemd or openrc)")
 	noTUI := flag.Bool("no-tui", false, "Disable interactive terminal UI")
 	flag.Parse()
+
+	// 提前获取运行目录以设置日志
+	wd, _ := os.Getwd()
+	configPath := filepath.Join(wd, configFileName)
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		parentConfig := filepath.Join(wd, "..", configFileName)
+		if _, err := os.Stat(parentConfig); err == nil {
+			configPath = parentConfig
+		}
+	}
+	logsDir := filepath.Join(filepath.Dir(configPath), logsDirName)
+	_ = os.MkdirAll(logsDir, 0755)
+	setupLogging(logsDir)
 
 	if *serviceInstall != "" {
 		if err := installService(*serviceInstall); err != nil {

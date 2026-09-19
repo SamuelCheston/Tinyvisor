@@ -1,3 +1,14 @@
 {
-  "scripts": []
+  "scripts": [
+    {
+      "id": "script-1789793740026726852",
+      "name": "Runtime Fail",
+      "workDir": "/tmp",
+      "content": "non_existent_command_12345",
+      "autoStart": false,
+      "restartPolicy": "never",
+      "createdAt": "2026-09-19T12:55:40.026726504+08:00",
+      "updatedAt": "2026-09-19T12:55:40.026726504+08:00"
+    }
+  ]
 }
