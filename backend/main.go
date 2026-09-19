@@ -237,7 +237,7 @@ func newApp(config Config, storePath, scriptFiles string) (*App, error) {
 
 	app := &App{
 		config:      config,
-		configPath:  filepath.Join(filepath.Dir(storePath), "..", configFileName),
+		configPath:  filepath.Join(filepath.Dir(storePath), configFileName),
 		storePath:   storePath,
 		scriptFiles: scriptFiles,
 		screenMgr:   screenMgr,
