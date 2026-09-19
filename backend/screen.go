@@ -7,143 +7,200 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 
 	"github.com/creack/pty"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 type ScreenManager struct {
-	SocketDir string
-	LogDir    string
-	mu        sync.Mutex
-	// 记录每个会话的 "master attach" 进程，用于向所有订阅者分发数据
-	attaches map[string]*screenAttach
+	LogDir   string
+	mu       sync.Mutex
+	sessions map[string]*scriptSession
 }
 
-type screenAttach struct {
-	cmd  *exec.Cmd
-	pty  *os.File
-	subs map[chan []byte]struct{}
-	mu   sync.Mutex
+type scriptSession struct {
+	cmd    *exec.Cmd
+	pty    *os.File
+	logger *lumberjack.Logger
+	subs   map[chan []byte]struct{}
+	mu     sync.Mutex
 }
 
 func NewScreenManager(baseDir string) (*ScreenManager, error) {
-	socketDir := filepath.Join(baseDir, "sockets")
 	logDir := filepath.Join(baseDir, "logs")
 
-	if err := os.MkdirAll(socketDir, 0700); err != nil {
-		return nil, err
-	}
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return nil, err
 	}
 
 	return &ScreenManager{
-		SocketDir: socketDir,
-		LogDir:    logDir,
-		attaches:  make(map[string]*screenAttach),
+		LogDir:   logDir,
+		sessions: make(map[string]*scriptSession),
 	}, nil
 }
 
-func (sm *ScreenManager) screenCmd(args ...string) *exec.Cmd {
-	cmd := exec.Command("screen", args...)
-	cmd.Env = append(os.Environ(), "SCREENDIR="+sm.SocketDir)
-	return cmd
+func (sm *ScreenManager) Start(id, workDir, command string) error {
+	sm.mu.Lock()
+	if _, ok := sm.sessions[id]; ok {
+		sm.mu.Unlock()
+		return fmt.Errorf("session %s already exists", id)
+	}
+	sm.mu.Unlock()
+
+	logFile := filepath.Join(sm.LogDir, id+".log")
+	logger := &lumberjack.Logger{
+		Filename:   logFile,
+		MaxSize:    10, // 10 megabytes
+		MaxBackups: 3,
+		MaxAge:     7,    // days
+		Compress:   true, // disabled by default
+	}
+
+	cmd := exec.Command("bash", "-c", command)
+	cmd.Dir = workDir
+	cmd.Env = os.Environ()
+
+	f, err := pty.Start(cmd)
+	if err != nil {
+		logger.Close()
+		return err
+	}
+
+	session := &scriptSession{
+		cmd:    cmd,
+		pty:    f,
+		logger: logger,
+		subs:   make(map[chan []byte]struct{}),
+	}
+
+	sm.mu.Lock()
+	sm.sessions[id] = session
+	sm.mu.Unlock()
+
+	go sm.consumeSession(id, session)
+
+	return nil
 }
 
-func (sm *ScreenManager) Start(id, workDir, command string) error {
-	logFile := filepath.Join(sm.LogDir, id+".log")
-	// 使用传统的 PTY 模式启动
-	// 注意：我们直接在 shell 中使用 tee 来记录日志，这是最可靠的方式
-	wrappedCmd := fmt.Sprintf("bash -c '%s' 2>&1 | tee -a %s", command, logFile)
-	args := []string{"-dmS", id, "bash", "-c", wrappedCmd}
-	cmd := sm.screenCmd(args...)
-	cmd.Dir = workDir
-	return cmd.Run()
+func (sm *ScreenManager) consumeSession(id string, session *scriptSession) {
+	defer session.pty.Close()
+	defer session.logger.Close()
+
+	buf := make([]byte, 4096)
+	for {
+		n, err := session.pty.Read(buf)
+		if n > 0 {
+			data := make([]byte, n)
+			copy(data, buf[:n])
+
+			// 写入日志（带轮转）
+			_, _ = session.logger.Write(data)
+
+			// 分发给订阅者
+			session.mu.Lock()
+			for sub := range session.subs {
+				select {
+				case sub <- data:
+				default:
+				}
+			}
+			session.mu.Unlock()
+		}
+		if err != nil {
+			break
+		}
+	}
+
+	// 进程结束，清理
+	_ = session.cmd.Wait()
+
+	sm.mu.Lock()
+	if sm.sessions[id] == session {
+		delete(sm.sessions, id)
+	}
+	sm.mu.Unlock()
 }
 
 func (sm *ScreenManager) Stop(id string) error {
-	// 使用 quit 命令停止 screen 会话
-	return sm.screenCmd("-S", id, "-X", "quit").Run()
+	sm.mu.Lock()
+	session, ok := sm.sessions[id]
+	sm.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("session not found")
+	}
+	return session.cmd.Process.Signal(syscall.SIGTERM)
 }
 
 func (sm *ScreenManager) Kill(id string) error {
-	// 尝试先优雅停止，如果不行则通过 pid kill
-	pid, err := sm.GetPID(id)
-	if err != nil {
-		return err
+	sm.mu.Lock()
+	session, ok := sm.sessions[id]
+	sm.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("session not found")
 	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return err
-	}
-	return process.Kill()
+	return session.cmd.Process.Kill()
 }
 
 func (sm *ScreenManager) SendInput(id string, data []byte) error {
-	// 使用 stuff 命令发送输入
-	return sm.screenCmd("-S", id, "-X", "stuff", string(data)).Run()
+	sm.mu.Lock()
+	session, ok := sm.sessions[id]
+	sm.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("session not found")
+	}
+	_, err := session.pty.Write(data)
+	return err
 }
 
 func (sm *ScreenManager) Resize(id string, cols, rows int) error {
-	// screen 不支持直接通过命令行 resize 远程会话，但我们可以通过附加的 PTY 来影响它
-	// 或者发送命令给会话内部
-	resizeCmd := fmt.Sprintf("width %d %d\n", cols, rows)
-	return sm.screenCmd("-S", id, "-X", "eval", resizeCmd).Run()
+	sm.mu.Lock()
+	session, ok := sm.sessions[id]
+	sm.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("session not found")
+	}
+	return pty.Setsize(session.pty, &pty.Winsize{
+		Rows: uint16(rows),
+		Cols: uint16(cols),
+	})
 }
 
 func (sm *ScreenManager) IsRunning(id string) (bool, error) {
-	output, err := sm.screenCmd("-ls").Output()
-	if err != nil {
-		// screen -ls 返回非0通常表示没有正在运行的会话
+	sm.mu.Lock()
+	session, ok := sm.sessions[id]
+	sm.mu.Unlock()
+	if !ok {
 		return false, nil
 	}
-	return strings.Contains(string(output), "."+id+"\t"), nil
+	// 检查进程是否还在运行
+	if session.cmd.Process == nil {
+		return false, nil
+	}
+	err := session.cmd.Process.Signal(syscall.Signal(0))
+	return err == nil, nil
 }
 
 func (sm *ScreenManager) GetPID(id string) (int, error) {
-	output, err := sm.screenCmd("-ls").Output()
-	if err != nil {
-		return 0, err
+	sm.mu.Lock()
+	session, ok := sm.sessions[id]
+	sm.mu.Unlock()
+	if !ok {
+		return 0, fmt.Errorf("session not found")
 	}
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		if strings.Contains(line, "."+id+"\t") {
-			parts := strings.Fields(line)
-			if len(parts) > 0 {
-				sessionInfo := parts[0] // e.g., 1234.script-id
-				pidStr := strings.Split(sessionInfo, ".")[0]
-				var pid int
-				fmt.Sscanf(pidStr, "%d", &pid)
-				return pid, nil
-			}
-		}
+	if session.cmd.Process == nil {
+		return 0, fmt.Errorf("process not started")
 	}
-	return 0, fmt.Errorf("session not found")
+	return session.cmd.Process.Pid, nil
 }
 
 func (sm *ScreenManager) ListRunning() ([]string, error) {
-	output, err := sm.screenCmd("-ls").Output()
-	if err != nil {
-		return nil, nil
-	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
 	var ids []string
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "There is") || strings.HasPrefix(line, "No Sockets") {
-			continue
-		}
-		parts := strings.Fields(line)
-		if len(parts) > 0 {
-			sessionInfo := parts[0]
-			idParts := strings.Split(sessionInfo, ".")
-			if len(idParts) > 1 {
-				ids = append(ids, idParts[1])
-			}
-		}
+	for id := range sm.sessions {
+		ids = append(ids, id)
 	}
 	return ids, nil
 }
@@ -151,87 +208,30 @@ func (sm *ScreenManager) ListRunning() ([]string, error) {
 // Attach 返回一个用于接收输出的 channel，并处理输入转发
 func (sm *ScreenManager) Attach(id string, sub chan []byte) error {
 	sm.mu.Lock()
-	attach, ok := sm.attaches[id]
-	if !ok {
-		// 创建新的 master attach
-		cmd := sm.screenCmd("-x", id)
-		f, err := pty.Start(cmd)
-		if err != nil {
-			sm.mu.Unlock()
-			return err
-		}
-
-		attach = &screenAttach{
-			cmd:  cmd,
-			pty:  f,
-			subs: make(map[chan []byte]struct{}),
-		}
-		sm.attaches[id] = attach
-
-		go sm.consumeAttach(id, attach)
-	}
+	session, ok := sm.sessions[id]
 	sm.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("session not found")
+	}
 
-	attach.mu.Lock()
-	attach.subs[sub] = struct{}{}
-	attach.mu.Unlock()
+	session.mu.Lock()
+	session.subs[sub] = struct{}{}
+	session.mu.Unlock()
 
 	return nil
 }
 
 func (sm *ScreenManager) Detach(id string, sub chan []byte) {
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	attach, ok := sm.attaches[id]
+	session, ok := sm.sessions[id]
+	sm.mu.Unlock()
 	if !ok {
 		return
 	}
 
-	attach.mu.Lock()
-	delete(attach.subs, sub)
-	count := len(attach.subs)
-	attach.mu.Unlock()
-
-	if count == 0 {
-		// 没有订阅者了，关闭 master attach 进程
-		attach.pty.Close()
-		if attach.cmd.Process != nil {
-			attach.cmd.Process.Signal(syscall.SIGTERM)
-		}
-		delete(sm.attaches, id)
-	}
-}
-
-func (sm *ScreenManager) consumeAttach(id string, attach *screenAttach) {
-	defer attach.pty.Close()
-
-	buf := make([]byte, 4096)
-	for {
-		n, err := attach.pty.Read(buf)
-		if n > 0 {
-			data := make([]byte, n)
-			copy(data, buf[:n])
-
-			attach.mu.Lock()
-			for sub := range attach.subs {
-				select {
-				case sub <- data:
-				default:
-				}
-			}
-			attach.mu.Unlock()
-		}
-		if err != nil {
-			break
-		}
-	}
-
-	sm.mu.Lock()
-	if sm.attaches[id] == attach {
-		delete(sm.attaches, id)
-	}
-	sm.mu.Unlock()
+	session.mu.Lock()
+	delete(session.subs, sub)
+	session.mu.Unlock()
 }
 
 func (sm *ScreenManager) GetLogs(id string) ([]string, error) {

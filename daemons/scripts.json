@@ -49,6 +49,26 @@
       "restartPolicy": "never",
       "createdAt": "2026-08-27T22:24:33.290224658+08:00",
       "updatedAt": "2026-08-27T22:24:33.290224658+08:00"
+    },
+    {
+      "id": "script-1789792217358123750",
+      "name": "Test PTY",
+      "workDir": "/tmp",
+      "content": "for i in {1..5}; do echo \"Loop $i\"; sleep 1; done",
+      "autoStart": false,
+      "restartPolicy": "never",
+      "createdAt": "2026-09-19T12:30:17.358123642+08:00",
+      "updatedAt": "2026-09-19T12:30:17.358123642+08:00"
+    },
+    {
+      "id": "script-1789792221114913816",
+      "name": "Test PTY",
+      "workDir": "/tmp",
+      "content": "for i in {1..5}; do echo \"Loop $i\"; sleep 1; done",
+      "autoStart": false,
+      "restartPolicy": "never",
+      "createdAt": "2026-09-19T12:30:21.114913586+08:00",
+      "updatedAt": "2026-09-19T12:30:21.114913586+08:00"
     }
   ]
 }

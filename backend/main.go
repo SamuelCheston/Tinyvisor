@@ -544,7 +544,7 @@ func (a *App) startScript(id string) (ScriptView, error) {
 		return ScriptView{}, err
 	}
 
-	// 使用 screen 启动
+	// 直接使用 PTY 启动
 	err := a.screenMgr.Start(id, item.Config.WorkDir, "bash "+scriptPath)
 	if err != nil {
 		a.mu.Unlock()
@@ -560,7 +560,7 @@ func (a *App) startScript(id string) (ScriptView, error) {
 	view := toScriptView(item)
 	a.mu.Unlock()
 
-	a.appendLog(id, "system", fmt.Sprintf("脚本已在 screen 中启动，PID=%d", view.PID))
+	a.appendLog(id, "system", fmt.Sprintf("脚本已启动，PID=%d", view.PID))
 	go a.watchProcess(id)
 
 	return view, nil
@@ -733,7 +733,7 @@ func (a *App) getLogs(id string) ([]LogEntry, error) {
 	copy(logs, item.Logs)
 	a.mu.RUnlock()
 
-	// 从 screen 日志文件中读取内容
+	// 从日志文件中读取内容
 	screenLogs, _ := a.screenMgr.GetLogs(id)
 	for _, line := range screenLogs {
 		logs = append(logs, LogEntry{
