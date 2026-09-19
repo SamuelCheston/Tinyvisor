@@ -29,9 +29,9 @@ var frontendContent embed.FS
 
 const (
 	configFileName      = "config.json"
-	daemonRootDirName   = "daemons"
 	scriptsStoreName    = "scripts.json"
 	scriptFilesDirName  = "scripts"
+	logsDirName         = "logs"
 	maxBufferedLogLines = 500
 )
 
@@ -155,13 +155,17 @@ func setupEnvironment() (Config, string, string, bool, error) {
 		}
 	}
 
-	// 确定数据目录 (daemons) 应该与配置文件在同一级
-	daemonRoot := filepath.Join(filepath.Dir(configPath), daemonRootDirName)
-	storePath := filepath.Join(daemonRoot, scriptsStoreName)
-	scriptFiles := filepath.Join(daemonRoot, scriptFilesDirName)
+	// 确定数据目录，与配置文件在同一级
+	dataRoot := filepath.Dir(configPath)
+	storePath := filepath.Join(dataRoot, scriptsStoreName)
+	scriptFiles := filepath.Join(dataRoot, scriptFilesDirName)
+	logsDir := filepath.Join(dataRoot, logsDirName)
 
-	if mkdirErr := os.MkdirAll(scriptFiles, 0755); mkdirErr != nil {
-		return Config{}, "", "", false, mkdirErr
+	if err := os.MkdirAll(scriptFiles, 0755); err != nil {
+		return Config{}, "", "", false, err
+	}
+	if err := os.MkdirAll(logsDir, 0755); err != nil {
+		return Config{}, "", "", false, err
 	}
 
 	createdConfig := false
@@ -225,8 +229,8 @@ func setupEnvironment() (Config, string, string, bool, error) {
 }
 
 func newApp(config Config, storePath, scriptFiles string) (*App, error) {
-	daemonRoot := filepath.Dir(storePath)
-	screenMgr, err := NewScreenManager(filepath.Join(daemonRoot, "screen_sessions"))
+	dataRoot := filepath.Dir(storePath)
+	screenMgr, err := NewScreenManager(filepath.Join(dataRoot, logsDirName))
 	if err != nil {
 		return nil, err
 	}

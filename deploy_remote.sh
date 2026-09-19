@@ -3,9 +3,9 @@
 # Supports Alpine Linux (apk/openrc) and Ubuntu/Debian (apt/systemd)
 # Usage: ./deploy_remote.sh [ip] [user] [password]
 
-IP=${1:-"192.168.1.187"}
-USER=${2:-"root"}
-PASS=${3:-"1"}
+IP=${1:-""}
+USER=${2:-""}
+PASS=${3:-""}
 
 SSH_OPTS="-o StrictHostKeyChecking=no"
 

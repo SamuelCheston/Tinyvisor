@@ -28,9 +28,7 @@ type scriptSession struct {
 	mu     sync.Mutex
 }
 
-func NewScreenManager(baseDir string) (*ScreenManager, error) {
-	logDir := filepath.Join(baseDir, "logs")
-
+func NewScreenManager(logDir string) (*ScreenManager, error) {
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return nil, err
 	}
