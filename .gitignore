@@ -24,3 +24,5 @@ dist-ssr
 *.sw?
 
 build
+# Local runtime config (contains apiKey) - never commit
+config.json

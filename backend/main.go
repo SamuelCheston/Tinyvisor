@@ -423,6 +423,10 @@ func (a *App) createScript(payload ScriptPayload) (ScriptView, error) {
 	}
 
 	a.mu.Lock()
+	if a.nameExistsLocked(validated.Name, "") {
+		a.mu.Unlock()
+		return ScriptView{}, errors.New("脚本名称已存在")
+	}
 	a.scripts[script.ID] = item
 	a.mu.Unlock()
 
@@ -447,6 +451,10 @@ func (a *App) updateScript(id string, payload ScriptPayload) (ScriptView, error)
 	if !ok {
 		a.mu.Unlock()
 		return ScriptView{}, errors.New("脚本不存在")
+	}
+	if a.nameExistsLocked(validated.Name, id) {
+		a.mu.Unlock()
+		return ScriptView{}, errors.New("脚本名称已存在")
 	}
 	running := item.Status == "running"
 
@@ -492,6 +500,30 @@ func (a *App) getScript(id string) (*ManagedScript, bool) {
 	defer a.mu.RUnlock()
 	item, ok := a.scripts[id]
 	return item, ok
+}
+
+// nameExistsLocked 检查是否已有同名脚本。调用方必须持有 a.mu（读锁或写锁）。
+// excludeID 用于更新场景排除自身。
+func (a *App) nameExistsLocked(name string, excludeID string) bool {
+	for id, item := range a.scripts {
+		if id != excludeID && item.Config.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// findIDByName 按名称解析脚本 ID。名称在创建/更新时强制唯一，
+// 因此最多命中一条。供编排器以稳定句柄寻址。
+func (a *App) findIDByName(name string) (string, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	for id, item := range a.scripts {
+		if item.Config.Name == name {
+			return id, true
+		}
+	}
+	return "", false
 }
 
 func (a *App) scriptPath(id string) string {
@@ -721,6 +753,31 @@ func (a *App) stopScriptAndWait(id string, forceAfterTimeout bool) (ScriptView, 
 	}
 
 	return view, nil
+}
+
+// restartScript 原子重启：运行中则先停止（等待退出，超时强制结束）再启动；
+// 未运行则直接启动。供编排器以单次调用完成重启动作，
+// 避免 stop/start 分两次调用时与自动重启观察窗产生竞态。
+func (a *App) restartScript(id string) (ScriptView, error) {
+	a.mu.RLock()
+	item, ok := a.scripts[id]
+	status := ""
+	if ok {
+		status = item.Status
+	}
+	a.mu.RUnlock()
+
+	if !ok {
+		return ScriptView{}, errors.New("脚本不存在")
+	}
+
+	if status == "running" {
+		if _, err := a.stopScriptAndWait(id, true); err != nil {
+			return ScriptView{}, err
+		}
+	}
+
+	return a.startScript(id)
 }
 
 func (a *App) getLogs(id string) ([]LogEntry, error) {
@@ -1147,7 +1204,11 @@ func main() {
 
 			script, err := app.createScript(payload)
 			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				status := http.StatusBadRequest
+				if err.Error() == "脚本名称已存在" {
+					status = http.StatusConflict
+				}
+				c.JSON(status, gin.H{"error": err.Error()})
 				return
 			}
 
@@ -1166,6 +1227,9 @@ func main() {
 				status := http.StatusBadRequest
 				if err.Error() == "脚本不存在" {
 					status = http.StatusNotFound
+				}
+				if err.Error() == "脚本名称已存在" {
+					status = http.StatusConflict
 				}
 				c.JSON(status, gin.H{"error": err.Error()})
 				return
@@ -1236,6 +1300,87 @@ func main() {
 				return
 			}
 
+			c.JSON(http.StatusOK, gin.H{"script": script})
+		})
+
+		api.POST("/scripts/:id/restart", func(c *gin.Context) {
+			script, err := app.restartScript(c.Param("id"))
+			if err != nil {
+				status := http.StatusBadRequest
+				if err.Error() == "脚本不存在" {
+					status = http.StatusNotFound
+				}
+				c.JSON(status, gin.H{"error": err.Error()})
+				return
+			}
+
+			c.JSON(http.StatusOK, gin.H{"script": script})
+		})
+
+		// 按名寻址：名称在创建/更新时强制唯一，是编排器使用的稳定句柄。
+		api.GET("/scripts/by-name/:name", func(c *gin.Context) {
+			name := strings.TrimSpace(c.Param("name"))
+			id, found := app.findIDByName(name)
+			if !found {
+				c.JSON(http.StatusNotFound, gin.H{"error": "脚本不存在"})
+				return
+			}
+
+			item, _ := app.getScript(id)
+			c.JSON(http.StatusOK, gin.H{"script": toScriptView(item)})
+		})
+
+		// 按名幂等 upsert：不存在则创建，存在则更新。
+		// 路径中的 name 为准，覆盖请求体里的 name 字段。
+		api.PUT("/scripts/by-name/:name", func(c *gin.Context) {
+			name := strings.TrimSpace(c.Param("name"))
+			if name == "" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "脚本名称不能为空"})
+				return
+			}
+
+			var payload ScriptPayload
+			if err := c.ShouldBindJSON(&payload); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "请求体格式不正确"})
+				return
+			}
+			payload.Name = name
+
+			if id, found := app.findIDByName(name); found {
+				script, err := app.updateScript(id, payload)
+				if err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+					return
+				}
+				c.JSON(http.StatusOK, gin.H{"script": script, "created": false})
+				return
+			}
+
+			script, err := app.createScript(payload)
+			if err != nil {
+				status := http.StatusBadRequest
+				if err.Error() == "脚本名称已存在" {
+					status = http.StatusConflict
+				}
+				c.JSON(status, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusCreated, gin.H{"script": script, "created": true})
+		})
+
+		api.POST("/scripts/by-name/:name/restart", func(c *gin.Context) {
+			name := strings.TrimSpace(c.Param("name"))
+			id, found := app.findIDByName(name)
+			if !found {
+				c.JSON(http.StatusNotFound, gin.H{"error": "脚本不存在"})
+				return
+			}
+
+			script, err := app.restartScript(id)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
 			c.JSON(http.StatusOK, gin.H{"script": script})
 		})
 

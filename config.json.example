@@ -1,0 +1,8 @@
+{
+  "port": 7891,
+  "name": "Tinyvisor Service",
+  "apiKey": "",
+  "pairingPIN": "",
+  "pinCreatedAt": "",
+  "pinExpiresAt": ""
+}
