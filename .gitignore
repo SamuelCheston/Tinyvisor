@@ -26,3 +26,6 @@ dist-ssr
 build
 # Local runtime config (contains apiKey) - never commit
 config.json
+# Per-instance runtime state (script definitions and generated script files)
+daemons/scripts.json
+daemons/scripts/
