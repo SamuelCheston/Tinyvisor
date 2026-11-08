@@ -649,7 +649,9 @@ func (a *App) watchProcess(id string) {
 
 		a.mu.RLock()
 		item, ok := a.scripts[id]
-		if !ok || item.ManualStop {
+		// 窗口内若已有别的路径把脚本重新拉起（如编排器的重启请求），
+		// 不再重复启动。
+		if !ok || item.ManualStop || item.Status == "running" {
 			a.mu.RUnlock()
 			return
 		}
@@ -676,7 +678,9 @@ func (a *App) stopScript(id string) (ScriptView, error) {
 	a.appendLog(id, "system", "收到停止请求")
 
 	if status == "running" {
-		if err := a.screenMgr.Stop(id); err != nil {
+		// 会话已被清理（进程崩溃/自行退出）等同于已经停下：幂等放行，
+		// 否则"状态还是 running、会话已不在"的窗口内停止/重启会误报失败。
+		if err := a.screenMgr.Stop(id); err != nil && !errors.Is(err, ErrSessionNotFound) {
 			return view, err
 		}
 	}
@@ -699,7 +703,7 @@ func (a *App) killScript(id string) (ScriptView, error) {
 	a.appendLog(id, "system", "收到强制结束请求")
 
 	if status == "running" {
-		if err := a.screenMgr.Kill(id); err != nil {
+		if err := a.screenMgr.Kill(id); err != nil && !errors.Is(err, ErrSessionNotFound) {
 			return view, err
 		}
 	}
@@ -758,6 +762,8 @@ func (a *App) stopScriptAndWait(id string, forceAfterTimeout bool) (ScriptView, 
 // restartScript 原子重启：运行中则先停止（等待退出，超时强制结束）再启动；
 // 未运行则直接启动。供编排器以单次调用完成重启动作，
 // 避免 stop/start 分两次调用时与自动重启观察窗产生竞态。
+// 崩溃后的会话同样可重启：进程崩溃时会话立即被清理而状态稍后才翻转，
+// stopScript 对"会话已不在"幂等（见 ErrSessionNotFound），随后正常启动。
 func (a *App) restartScript(id string) (ScriptView, error) {
 	a.mu.RLock()
 	item, ok := a.scripts[id]
