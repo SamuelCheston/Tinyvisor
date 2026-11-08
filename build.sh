@@ -26,9 +26,9 @@ go mod tidy
 CGO_ENABLED=0 go build -ldflags="-s -w" -o ../build/tinyvisor-deploy .
 cd ..
 
-# 准备运行时环境
-if [ -f config.json ]; then
-    cp config.json build/config.json.example
+# 准备运行时环境：只放无密钥模板，绝不复制真实 config.json（含 apiKey）
+if [ -f config.json.example ]; then
+    cp config.json.example build/config.json.example
 fi
 
 echo "---------------------------------------"

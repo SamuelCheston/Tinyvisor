@@ -42,3 +42,22 @@ Tinyvisor 在**启动时**读取 `config.json` 的 `apiKey`，运行中不会重
   留空时首次启动也会自动生成随机 key。
 - 远程配对走一次性 PIN（见 `docs/pairing_pin_design.md`），
   不要通过聊天/文档传递长期 key。
+- `build.sh` 只复制 `config.json.example` 模板进 `build/`，
+  不再复制真实 `config.json`（2026-11-08 修复——旧行为会把真实
+  apiKey 带进构建副本，正是本次泄露的源头之一）。
+
+## 2026-11-08 核实与作废记录
+
+- **旧 key 已作废**：提交 `a7b5f88`–`c2a42fa` 时代 `config.json` 里的
+  旧 apiKey 视为永久泄露且不再有效（值不在此复述）。按作者决定
+  **不改写 git 历史**——key 一旦公开，改写历史只是自欺，轮换才是止损。
+- 本机核实（2026-11-08）：
+  - 没有任何正在运行的实例使用旧 key（当时唯一在跑的实例是
+    `/tmp/tinyvisor-scratch`，使用独立的一次性测试 key）。
+  - 全盘搜索确认旧 key 只存在于：git 历史（保留）、本地构建副本
+    `build/config.json.example`（已清空的 apiKey 替换）、以及本机
+    IDE/会话日志的读取痕迹（本地文件，不进任何仓库）。
+  - 调用方核查：HA-Services-Deployer 的 `deploy/secrets/` 为空，
+    无任何调用方持有旧 key。
+- 新实例：`apiKey` 留空首次启动即自动生成随机 key（见
+  `backend/main.go` 的 `generateRandomString(32)`），无需手工注入。
