@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,12 @@ import (
 	"github.com/creack/pty"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
+
+// ErrSessionNotFound 表示脚本会话不存在。进程崩溃/自行退出后
+// consumeSession 会立即清理会话，而 App 层状态要等观察循环下一拍才翻
+// 转——这个窗口内"状态说运行中、会话已不在"。停止/杀进程对该情形应当
+// 幂等（目标状态就是"不在运行"），调用方据此区分真正的错误。
+var ErrSessionNotFound = errors.New("session not found")
 
 type ScreenManager struct {
 	LogDir   string
@@ -134,7 +141,7 @@ func (sm *ScreenManager) Stop(id string) error {
 	session, ok := sm.sessions[id]
 	sm.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("session not found")
+		return ErrSessionNotFound
 	}
 	return session.cmd.Process.Signal(syscall.SIGTERM)
 }
@@ -144,7 +151,7 @@ func (sm *ScreenManager) Kill(id string) error {
 	session, ok := sm.sessions[id]
 	sm.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("session not found")
+		return ErrSessionNotFound
 	}
 	return session.cmd.Process.Kill()
 }
@@ -154,7 +161,7 @@ func (sm *ScreenManager) SendInput(id string, data []byte) error {
 	session, ok := sm.sessions[id]
 	sm.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("session not found")
+		return ErrSessionNotFound
 	}
 	_, err := session.pty.Write(data)
 	return err
@@ -165,7 +172,7 @@ func (sm *ScreenManager) Resize(id string, cols, rows int) error {
 	session, ok := sm.sessions[id]
 	sm.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("session not found")
+		return ErrSessionNotFound
 	}
 	return pty.Setsize(session.pty, &pty.Winsize{
 		Rows: uint16(rows),
@@ -193,7 +200,7 @@ func (sm *ScreenManager) GetPID(id string) (int, error) {
 	session, ok := sm.sessions[id]
 	sm.mu.Unlock()
 	if !ok {
-		return 0, fmt.Errorf("session not found")
+		return 0, ErrSessionNotFound
 	}
 	if session.cmd.Process == nil {
 		return 0, fmt.Errorf("process not started")
@@ -217,7 +224,7 @@ func (sm *ScreenManager) Attach(id string, sub chan []byte) error {
 	session, ok := sm.sessions[id]
 	sm.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("session not found")
+		return ErrSessionNotFound
 	}
 
 	session.mu.Lock()
