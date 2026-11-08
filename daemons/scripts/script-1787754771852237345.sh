@@ -1,1 +1,0 @@
-echo "Starting..."; sleep 5; echo "Exiting..."; exit 1

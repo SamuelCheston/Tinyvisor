@@ -1,1 +1,0 @@
-for i in {1..10}; do echo "Line $i at $(date)"; sleep 1; done
